@@ -12,6 +12,8 @@
 //! server rather than merely deprecated.
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -1067,6 +1069,120 @@ impl fmt::Debug for RefreshTokenRecord {
         out.field("authentication", &self.authentication);
         out.finish()
     }
+}
+
+/// What the host is told when it mints an access token: the values this server has ALREADY
+/// decided for the issuance. The host chooses only the string.
+///
+/// `#[non_exhaustive]`: the crate builds it and the host reads it, and a sender-constraining
+/// feature is the obvious next field. A host that could build one could not be handed a new field.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct MintRequest<'a> {
+    /// The client the token is issued to.
+    pub client_id: &'a ClientId,
+    /// The resource owner, or `None` for a grant with no user (RFC 6749 section 4.4).
+    pub subject: Option<&'a str>,
+    /// The scope GRANTED, which may be narrower than the scope requested.
+    pub scope: &'a ScopeSet,
+    /// The RFC 8707 resource indicators the token is addressed to; empty when none were named.
+    pub resource: &'a [String],
+    /// The grant this issuance answers. A refresh rotation mints again, as `RefreshToken`.
+    pub grant_type: crate::grant::GrantType,
+    /// The instant of issuance, as recorded on the persisted [`IssuedToken`].
+    pub issued_at: SystemTime,
+    /// The instant the token dies, as recorded on the persisted [`IssuedToken`] and as reported
+    /// in `expires_in`. Already capped by any lifetime ceiling, so a host embedding an expiry
+    /// must use this one: a credential whose own expiry outlives the record is one a resource
+    /// server honours after this server has stopped doing so.
+    pub expires_at: SystemTime,
+    /// The 256-bit random identifier this server drew for the token, the value that would have
+    /// been the opaque token or the RFC 9068 `jti`. Offered for hosts that want a unique id
+    /// inside their credential; it is never persisted as a token of its own.
+    pub token_id: &'a str,
+}
+
+/// An access token could not be minted. Answered as an RFC 6749 section 5.2 `server_error`, and
+/// NOTHING is issued: there is no fallback to an opaque token.
+///
+/// The message stays on the host's side; it never reaches the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintError(String);
+
+impl MintError {
+    /// Describe a minting failure. Do not put credential material in it.
+    pub fn new(message: impl Into<String>) -> Self {
+        MintError(message.into())
+    }
+}
+
+impl fmt::Display for MintError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "mint error: {}", self.0)
+    }
+}
+
+impl std::error::Error for MintError {}
+
+/// THE HOST CHOOSES THE ACCESS TOKEN STRING. Installed with
+/// [`crate::server::AuthorizationServer::with_access_token_minter`].
+///
+/// For a deployment whose resource servers already validate a credential of their own: the
+/// client receives that credential, and this server persists its [`IssuedToken`] keyed by it, so
+/// RFC 7662 introspection, RFC 7009 revocation and refresh rotation all operate on the exact
+/// string the client presents. RFC 6749 section 5.1 places no format requirement on
+/// `access_token`, and RFC 9068 is opt-in, so a host-defined format is within the spec.
+///
+/// # What you must guarantee
+///
+/// - **Uniqueness.** [`crate::store::Storage::put_token`] is keyed by this string and overwrites,
+///   so two live tokens minted to one string become one record, and revoking either revokes the
+///   other's lifetime. Embedding [`MintRequest::token_id`] is the simple way to guarantee it.
+/// - **RFC 6750 section 2.1 `b64token` syntax**, because that is the only form a client can
+///   present in an `Authorization` header (RFC 9449 section 7.1 reuses it for DPoP). Anything
+///   else, including the empty string, is refused as `server_error` and nothing is issued.
+/// - **No panic.** Every failure is `Err(MintError)`, for the reason given on
+///   [`crate::jwt::JwsSigner::sign`].
+///
+/// A server that also configures RFC 9068 signing (`AccessTokenFormat::Jwt`) refuses every
+/// issuance as `server_error`: the two settings disagree about what the wire token IS, and
+/// preferring either silently leaves the other half of the deployment (the published JWKS, or
+/// the host's resource servers) expecting tokens that never arrive.
+pub trait AccessTokenMinter: Send + Sync {
+    /// The `access_token` string for this issuance.
+    fn mint(
+        &self,
+        request: MintRequest<'_>,
+    ) -> impl Future<Output = Result<String, MintError>> + Send;
+}
+
+/// The OBJECT-SAFE shadow of [`AccessTokenMinter::mint`], for the reason given on
+/// `crate::jwt::DynJwsSigner`: return-position `impl Trait` keeps the public trait natural to
+/// implement at MSRV 1.75 and is what makes it not object safe. The cost is one allocation per
+/// minted token, paid only by a host that installed a minter.
+pub(crate) trait DynAccessTokenMinter: Send + Sync {
+    fn dyn_mint<'a>(
+        &'a self,
+        request: MintRequest<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, MintError>> + Send + 'a>>;
+}
+
+impl<T: AccessTokenMinter> DynAccessTokenMinter for T {
+    fn dyn_mint<'a>(
+        &'a self,
+        request: MintRequest<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, MintError>> + Send + 'a>> {
+        Box::pin(self.mint(request))
+    }
+}
+
+/// RFC 6750 section 2.1: `b64token = 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`.
+pub(crate) fn is_b64token(token: &str) -> bool {
+    let body = token.trim_end_matches('=');
+    !body.is_empty()
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~+/".contains(&b))
 }
 
 #[cfg(test)]

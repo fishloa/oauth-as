@@ -220,3 +220,14 @@ fn refresh_token_retry_from_a_prior_release_without_jkt_migrates_to_none() {
     assert_eq!(migrated.response, retry.response);
     assert_eq!(migrated.until, retry.until);
 }
+
+/// RFC 6750 section 2.1 `b64token`: at least one token character, then only trailing `=`.
+#[test]
+fn b64token_accepts_trailing_padding_only() {
+    for ok in ["a", "abc==", "A-._~+/9"] {
+        assert!(is_b64token(ok), "{ok:?}");
+    }
+    for bad in ["", "=", "==", "a=b", "a b", "a\n", "caf\u{e9}"] {
+        assert!(!is_b64token(bad), "{bad:?}");
+    }
+}

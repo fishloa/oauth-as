@@ -629,6 +629,7 @@ struct Installed {
     rate_limiter: Option<Box<dyn RateLimiter>>,
     secret_verifier: Option<Box<dyn SecretVerifier>>,
     registration_policy: Option<Box<dyn RegistrationPolicy>>,
+    access_token_minter: Option<Box<dyn crate::token::DynAccessTokenMinter>>,
     #[cfg(feature = "jar")]
     request_object_keys: Option<Box<dyn crate::par::RequestObjectKeys>>,
     /// The host's installed asymmetric verifiers, one slot per [`crate::jwt::JwsAlg`], for
@@ -689,6 +690,14 @@ impl Hooks {
     /// Install the RFC 7591 registration policy, replacing any previous one.
     pub(crate) fn install_registration_policy(&mut self, policy: Box<dyn RegistrationPolicy>) {
         self.installed().registration_policy = Some(policy);
+    }
+
+    /// Install the access token minter, replacing any previous one.
+    pub(crate) fn install_access_token_minter(
+        &mut self,
+        minter: Box<dyn crate::token::DynAccessTokenMinter>,
+    ) {
+        self.installed().access_token_minter = Some(minter);
     }
 
     /// Install the RFC 9101 request object verification keys, replacing any previous source.
@@ -810,6 +819,15 @@ impl Hooks {
     pub fn registration_policy(&self) -> Option<&dyn RegistrationPolicy> {
         match &self.0 {
             Some(installed) => installed.registration_policy.as_deref(),
+            None => None,
+        }
+    }
+
+    /// The installed access token minter. `pub(crate)` because its type is the crate's private
+    /// object-safe shadow; a host holds its own minter and has no reason to reach it through here.
+    pub(crate) fn access_token_minter(&self) -> Option<&dyn crate::token::DynAccessTokenMinter> {
+        match &self.0 {
+            Some(installed) => installed.access_token_minter.as_deref(),
             None => None,
         }
     }
