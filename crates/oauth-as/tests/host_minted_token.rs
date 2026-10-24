@@ -324,3 +324,36 @@ async fn a_minter_together_with_jwt_format_is_refused() {
     assert_eq!(err.error, ErrorCode::ServerError);
     assert!(minter.seen().is_empty(), "nothing minted");
 }
+
+/// The device code is spent by the refused redemption, exactly as by a successful one: the
+/// approved grant is taken atomically before minting, so a refused mint is a terminal answer and
+/// a second poll cannot reach the minter again (RFC 8628 s3.5: the device stops on any error
+/// other than `authorization_pending` and `slow_down`).
+#[tokio::test]
+async fn a_refused_mint_spends_the_device_code() {
+    for mode in [Mode::Fail, Mode::Denied, Mode::Empty] {
+        let clock = ManualClock::at_epoch();
+        let minter = RecordingMinter::new(mode);
+        let srv = server_with(clock.clone(), minter.clone()).await;
+        let client_id = ClientId::new("device-client");
+        let auth = srv
+            .device_authorization(&client_id, None, None)
+            .await
+            .unwrap();
+        srv.approve_device(&auth.user_code, "user-42")
+            .await
+            .unwrap();
+        let poll = || TokenRequest::DeviceCode {
+            client_id: client_id.clone(),
+            client_secret: None,
+            device_code: auth.device_code.clone(),
+        };
+
+        clock.advance(Duration::from_secs(5));
+        assert!(srv.token(poll()).await.is_err());
+        clock.advance(Duration::from_secs(5));
+        let again = srv.token(poll()).await.unwrap_err();
+        assert_eq!(again.error, ErrorCode::InvalidGrant);
+        assert_eq!(minter.seen().len(), 1, "minted at most once per approval");
+    }
+}
