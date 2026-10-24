@@ -55,6 +55,9 @@ struct Seen {
 enum Mode {
     Mint,
     Fail,
+    Denied,
+    /// Mint the first token, deny every later one: a subject disabled between issuance and refresh.
+    DenyAfterFirst,
     Empty,
     NotB64Token,
 }
@@ -93,6 +96,9 @@ impl AccessTokenMinter for RecordingMinter {
         match self.mode {
             Mode::Mint => Ok(format!("host-credential-{}", seen.len())),
             Mode::Fail => Err(MintError::new("credential service unavailable")),
+            Mode::Denied => Err(MintError::denied("subject disabled")),
+            Mode::DenyAfterFirst if seen.len() == 1 => Ok("host-credential-1".into()),
+            Mode::DenyAfterFirst => Err(MintError::denied("subject disabled")),
             Mode::Empty => Ok(String::new()),
             Mode::NotB64Token => Ok("host credential".into()),
         }
@@ -230,13 +236,13 @@ async fn refresh_rotation_mints_through_the_host_again() {
 }
 
 /// Fail closed: no fallback to the opaque string, and nothing persisted under either value.
-async fn assert_refused_and_nothing_persisted(mode: Mode) {
+async fn assert_refused_and_nothing_persisted(mode: Mode, expected: ErrorCode) {
     let clock = ManualClock::at_epoch();
     let minter = RecordingMinter::new(mode);
     let srv = server_with(clock.clone(), minter.clone()).await;
 
     let err = device_grant(&srv, &clock).await.unwrap_err();
-    assert_eq!(err.error, ErrorCode::ServerError);
+    assert_eq!(err.error, expected);
 
     let seen = minter.seen();
     assert_eq!(seen.len(), 1);
@@ -251,17 +257,49 @@ async fn assert_refused_and_nothing_persisted(mode: Mode) {
 
 #[tokio::test]
 async fn a_minter_error_is_server_error_and_persists_nothing() {
-    assert_refused_and_nothing_persisted(Mode::Fail).await;
+    assert_refused_and_nothing_persisted(Mode::Fail, ErrorCode::ServerError).await;
+}
+
+/// RFC 8628 s3.5: the host refusing the subject at poll time is the grant being denied, which the
+/// device must be told so it stops polling, not a server fault it should retry.
+#[tokio::test]
+async fn a_denied_mint_on_the_device_grant_is_access_denied() {
+    assert_refused_and_nothing_persisted(Mode::Denied, ErrorCode::AccessDenied).await;
+    assert_eq!(ErrorCode::AccessDenied.http_status(), 400);
+}
+
+/// RFC 6749 s5.2 defines no `access_denied` at the token endpoint outside the device grant; a
+/// refresh the host will no longer honour is a grant that is no longer valid, `invalid_grant`.
+#[tokio::test]
+async fn a_denied_mint_on_refresh_is_invalid_grant_and_persists_nothing() {
+    let clock = ManualClock::at_epoch();
+    let minter = RecordingMinter::new(Mode::DenyAfterFirst);
+    let srv = server_with(clock.clone(), minter.clone()).await;
+    let first = device_grant(&srv, &clock).await.unwrap();
+
+    let err = srv
+        .token(TokenRequest::RefreshToken {
+            client_id: ClientId::new("device-client"),
+            client_secret: None,
+            refresh_token: first.refresh_token.expect("refresh issued by default"),
+            scope: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.error, ErrorCode::InvalidGrant);
+    let seen = minter.seen();
+    assert_eq!(seen.len(), 2);
+    assert!(srv.introspect(&seen[1].token_id).await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn an_empty_host_string_is_refused() {
-    assert_refused_and_nothing_persisted(Mode::Empty).await;
+    assert_refused_and_nothing_persisted(Mode::Empty, ErrorCode::ServerError).await;
 }
 
 #[tokio::test]
 async fn a_host_string_outside_rfc6750_b64token_is_refused() {
-    assert_refused_and_nothing_persisted(Mode::NotB64Token).await;
+    assert_refused_and_nothing_persisted(Mode::NotB64Token, ErrorCode::ServerError).await;
 }
 
 /// A host that configured RFC 9068 signing AND installed a minter has said two contradictory

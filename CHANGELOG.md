@@ -21,8 +21,10 @@ whatever version is current at each real crates.io release appear as published o
   persisted under the host's string, so RFC 7662 introspection, RFC 7009 revocation and refresh
   rotation work on exactly what the client holds. Fails closed: a `MintError`, or a string that is
   not an RFC 6750 s2.1 `b64token` (including the empty string), is `server_error` with nothing
-  persisted and no fallback to an opaque token; a minter together with `AccessTokenFormat::Jwt`
-  refuses every issuance. Uniqueness of the string is the host's obligation, since
+  persisted and no fallback to an opaque token. `MintError::denied` is a refusal rather than a
+  failure (the subject was disabled after approval): `access_denied` on the device grant (RFC 8628
+  s3.5) and `invalid_grant` elsewhere (RFC 6749 s5.2), again with nothing persisted. A minter
+  together with `AccessTokenFormat::Jwt` refuses every issuance. Uniqueness of the string is the host's obligation, since
   `Storage::put_token` overwrites. Additive and available in the default build; one allocation per
   minted token, only for a host that installs a minter.
 
