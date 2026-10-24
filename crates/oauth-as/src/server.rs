@@ -2053,6 +2053,18 @@ impl<S: Storage, C: Clock> AuthorizationServer<S, C> {
         self
     }
 
+    /// Install the host's [`crate::token::AccessTokenMinter`]: the host chooses every access
+    /// token string this server issues, and the record is persisted under it. Read the trait docs
+    /// for what the host must guarantee, and note that combining this with
+    /// `AccessTokenFormat::Jwt` refuses every issuance.
+    pub fn with_access_token_minter(
+        mut self,
+        minter: impl crate::token::AccessTokenMinter + 'static,
+    ) -> Self {
+        self.hooks.install_access_token_minter(Box::new(minter));
+        self
+    }
+
     /// Install the RFC 9101 request object verification keys: which public key, under which
     /// algorithm, each client registered for signing request objects.
     ///
@@ -6241,20 +6253,26 @@ impl<S: Storage, C: Clock> AuthorizationServer<S, C> {
         // `bound` are all built above and read below, so they are all in the frame. The SIZE
         // claim is unaffected and is gated by `tests/allocation.rs`; the description was simply
         // wrong, and it matters because that await is the host's `JwsSigner` and is unbounded.
+        //
+        // A host minter replaces the signing step outright, so the drawn string passes through it
+        // untouched to become the minter's `token_id` below.
         #[cfg(feature = "jwt")]
-        let prepared = self.access_token_signing_input(
-            client,
-            subject.as_deref(),
-            &scope,
-            &resource,
-            &details,
-            now,
-            expires_at,
-            access_token,
-            bound,
-            &actor,
-            &authentication,
-        )?;
+        let prepared = match self.hooks.access_token_minter() {
+            Some(_) => Err(access_token),
+            None => self.access_token_signing_input(
+                client,
+                subject.as_deref(),
+                &scope,
+                &resource,
+                &details,
+                now,
+                expires_at,
+                access_token,
+                bound,
+                &actor,
+                &authentication,
+            )?,
+        };
         #[cfg(feature = "jwt")]
         let access_token = match prepared {
             Err(opaque) => opaque,
@@ -6266,6 +6284,36 @@ impl<S: Storage, C: Clock> AuthorizationServer<S, C> {
                 let _ = e;
                 ErrorResponse::new(ErrorCode::ServerError)
             })?,
+        };
+        // The host's string, when the host installed a minter. Like a failed signature, every
+        // refusal here mints NOTHING: falling back to the drawn opaque string would hand the
+        // client a credential the host's resource servers do not recognise, and the host would
+        // never learn its minter was failing.
+        let access_token = match self.hooks.access_token_minter() {
+            None => access_token,
+            Some(minter) => {
+                #[cfg(feature = "jwt")]
+                if matches!(self.config.access_token_format, AccessTokenFormat::Jwt(_)) {
+                    return Err(ErrorResponse::new(ErrorCode::ServerError));
+                }
+                let minted = minter
+                    .dyn_mint(crate::token::MintRequest {
+                        client_id: &client.client_id,
+                        subject: subject.as_deref(),
+                        scope: &scope,
+                        resource: &resource,
+                        grant_type,
+                        issued_at: now,
+                        expires_at,
+                        token_id: &access_token,
+                    })
+                    .await
+                    .map_err(|_| ErrorResponse::new(ErrorCode::ServerError))?;
+                if !crate::token::is_b64token(&minted) {
+                    return Err(ErrorResponse::new(ErrorCode::ServerError));
+                }
+                minted
+            }
         };
         let access_record = IssuedToken {
             // RFC 9449 s6: the binding is recorded on the AS side too, not only in the token,

@@ -12,6 +12,20 @@ whatever version is current at each real crates.io release appear as published o
 
 ## [Unreleased]
 
+### Added
+
+- Host-minted access tokens: `AuthorizationServer::with_access_token_minter` installs an
+  `AccessTokenMinter`, and the host chooses the `access_token` string for every grant. It is told
+  what this server already decided (`MintRequest`: client, subject, granted scope, resource,
+  grant type, issuance instant, the capped expiry, and the random token id). The `IssuedToken` is
+  persisted under the host's string, so RFC 7662 introspection, RFC 7009 revocation and refresh
+  rotation work on exactly what the client holds. Fails closed: a `MintError`, or a string that is
+  not an RFC 6750 s2.1 `b64token` (including the empty string), is `server_error` with nothing
+  persisted and no fallback to an opaque token; a minter together with `AccessTokenFormat::Jwt`
+  refuses every issuance. Uniqueness of the string is the host's obligation, since
+  `Storage::put_token` overwrites. Additive and available in the default build; one allocation per
+  minted token, only for a host that installs a minter.
+
 ### Changed
 
 - `docs`: oauth-as 1.0.0 is OpenID Certified to the FAPI2SP OP private key + DPoP profile (OpenID

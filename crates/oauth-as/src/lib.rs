@@ -458,8 +458,8 @@ pub use store::{
 #[cfg_attr(docsrs, doc(cfg(any(feature = "dpop", feature = "mtls"))))]
 pub use token::Confirmation;
 pub use token::{
-    IntrospectionResponse, IssuedToken, RefreshTokenRecord, RefreshTokenState, TokenResponse,
-    TokenType, TokenTypeHint,
+    AccessTokenMinter, IntrospectionResponse, IssuedToken, MintError, MintRequest,
+    RefreshTokenRecord, RefreshTokenState, TokenResponse, TokenType, TokenTypeHint,
 };
 #[cfg(feature = "token-exchange")]
 #[cfg_attr(docsrs, doc(cfg(feature = "token-exchange")))]
