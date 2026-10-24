@@ -6308,7 +6308,13 @@ impl<S: Storage, C: Clock> AuthorizationServer<S, C> {
                         token_id: &access_token,
                     })
                     .await
-                    .map_err(|_| ErrorResponse::new(ErrorCode::ServerError))?;
+                    .map_err(|e| {
+                        ErrorResponse::new(match (e.denied, grant_type) {
+                            (false, _) => ErrorCode::ServerError,
+                            (true, GrantType::DeviceCode) => ErrorCode::AccessDenied,
+                            (true, _) => ErrorCode::InvalidGrant,
+                        })
+                    })?;
                 if !crate::token::is_b64token(&minted) {
                     return Err(ErrorResponse::new(ErrorCode::ServerError));
                 }

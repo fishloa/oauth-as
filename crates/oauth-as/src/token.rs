@@ -1102,23 +1102,42 @@ pub struct MintRequest<'a> {
     pub token_id: &'a str,
 }
 
-/// An access token could not be minted. Answered as an RFC 6749 section 5.2 `server_error`, and
-/// NOTHING is issued: there is no fallback to an opaque token.
+/// An access token could not be minted. NOTHING is issued: there is no fallback to an opaque
+/// token. [`MintError::new`] is a failure (`server_error`); [`MintError::denied`] is a refusal.
 ///
 /// The message stays on the host's side; it never reaches the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MintError(String);
+pub struct MintError {
+    message: String,
+    pub(crate) denied: bool,
+}
 
 impl MintError {
     /// Describe a minting failure. Do not put credential material in it.
     pub fn new(message: impl Into<String>) -> Self {
-        MintError(message.into())
+        MintError {
+            message: message.into(),
+            denied: false,
+        }
+    }
+
+    /// The host REFUSES this subject or client a token, for example because the account was
+    /// disabled after the user approved. This is the grant being denied, not a server fault, so it
+    /// is answered as a client error rather than `server_error`: `access_denied` on the device
+    /// grant (RFC 8628 section 3.5), so the device stops polling, and `invalid_grant` on every
+    /// other grant, since RFC 6749 section 5.2 defines no `access_denied` at the token endpoint.
+    /// Nothing is issued either way.
+    pub fn denied(message: impl Into<String>) -> Self {
+        MintError {
+            message: message.into(),
+            denied: true,
+        }
     }
 }
 
 impl fmt::Display for MintError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "mint error: {}", self.0)
+        write!(f, "mint error: {}", self.message)
     }
 }
 
